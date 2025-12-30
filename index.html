@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Three.js Gesture Particles</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; }
+        #video-container { position: absolute; bottom: 10px; right: 10px; width: 200px; border: 2px solid white; z-index: 10; }
+        #video-container video { width: 100%; transform: scaleX(-1); }
+        #ui { position: absolute; top: 10px; left: 10px; color: white; font-family: sans-serif; pointer-events: none; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <h1>Hand Morph Particles</h1>
+        <p>Pinch to contract | Open hand to expand</p>
+    </div>
+    <div id="video-container">
+        <video id="webcam" autoplay playsinline></video>
+    </div>
+
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+        }
+    }
+    </script>
+
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
+
+
+        // --- CONFIG & STATE ---
+        const PARTICLE_COUNT = 3000;
+        let handLandmarker;
+        let webcamRunning = false;
+        let currentShape = 'saturn';
+        
+        // --- THREE.JS SETUP ---
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 30;
+
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+
+        // Particle Geometry
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(PARTICLE_COUNT * 3);
+        const colors = new Float32Array(PARTICLE_COUNT * 3);
+        
+        for (let i = 0; i < PARTICLE_COUNT * 3; i++) {
+            positions[i] = (Math.random() - 0.5) * 50;
+            colors[i] = Math.random();
+        }
+
+
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+
+        const material = new THREE.PointsMaterial({ 
+            size: 0.15, 
+            vertexColors: true, 
+            blending: THREE.AdditiveBlending, 
+            transparent: true 
+        });
+        const points = new THREE.Points(geometry, material);
+        scene.add(points);
+
+
+        // --- SHAPE GENERATORS ---
+        function getSaturnPoints(i) {
+            // Core Sphere vs Ring
+            if (i < PARTICLE_COUNT * 0.6) {
+                // Sphere
+                const phi = Math.acos(-1 + (2 * i) / (PARTICLE_COUNT * 0.6));
+                const theta = Math.sqrt(PARTICLE_COUNT * 0.6 * Math.PI) * phi;
+                return new THREE.Vector3(
+                    5 * Math.cos(theta) * Math.sin(phi),
+                    5 * Math.sin(theta) * Math.sin(phi),
+                    5 * Math.cos(phi)
+                );
+            } else {
+                // Rings
+                const angle = Math.random() * Math.PI * 2;
+                const radius = 8 + Math.random() * 4;
+                return new THREE.Vector3(Math.cos(angle) * radius, (Math.random() - 0.5), Math.sin(angle) * radius);
+            }
+        }
+
+
+        // --- MEDIAPIPE SETUP ---
+        const createHandLandmarker = async () => {
+            const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm");
+            handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task" },
+                runningMode: "VIDEO",
+                numHands: 1
+            });
+            startWebcam();
+        };
+
+
+        const startWebcam = async () => {
+            const video = document.getElementById("webcam");
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            video.srcObject = stream;
+            webcamRunning = true;
+        };
+
+
+        createHandLandmarker();
+
+
+        // --- ANIMATION LOOP ---
+        const targetPositions = new Float32Array(PARTICLE_COUNT * 3);
+        let expansionFactor = 1;
+
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+
+            if (handLandmarker && webcamRunning) {
+                const video = document.getElementById("webcam");
+                const result = handLandmarker.detectForVideo(video, performance.now());
+                
+                if (result.landmarks && result.landmarks[0]) {
+                    const thumb = result.landmarks[0][4];
+                    const index = result.landmarks[0][8];
+                    
+                    // Calculate "Pinch" distance
+                    const dx = thumb.x - index.x;
+                    const dy = thumb.y - index.y;
+                    const dist = Math.sqrt(dx*dx + dy*dy);
+                    
+                    // Map distance to expansion (0.1 to 3.0)
+                    expansionFactor = THREE.MathUtils.lerp(expansionFactor, dist * 10, 0.1);
+                    
+                    // Rotate based on hand position
+                    points.rotation.y = (result.landmarks[0][0].x - 0.5) * 4;
+                    points.rotation.x = (result.landmarks[0][0].y - 0.5) * 4;
+                }
+            }
+
+
+            // Update Particle Positions
+            const posAttr = geometry.attributes.position;
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const target = getSaturnPoints(i).multiplyScalar(expansionFactor);
+                
+                posAttr.array[i * 3] += (target.x - posAttr.array[i * 3]) * 0.1;
+                posAttr.array[i * 3 + 1] += (target.y - posAttr.array[i * 3 + 1]) * 0.1;
+                posAttr.array[i * 3 + 2] += (target.z - posAttr.array[i * 3 + 2]) * 0.1;
+            }
+            posAttr.needsUpdate = true;
+            renderer.render(scene, camera);
+        }
+
+
+        animate();
+    </script>
+</body>
+</html>
